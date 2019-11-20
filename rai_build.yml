@@ -20,7 +20,7 @@ commands:
     # - time python m1.1.py
     # - time python m1.2.py
     # - time python m2.1.py
-    - time python m3.1.py
+    - time python m4.1.py 
     # - nvprof python m1.2.py
     # - time python m2.1.py 100 # execute code
     # - time python m2.1.py 1000 # execute code
