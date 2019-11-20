@@ -3,7 +3,7 @@
 #define MXNET_OPERATOR_NEW_FORWARD_CUH_
 
 #include <mxnet/base.h>
-#include <stdio.h> 
+#include <stdio.h>
 
 #define BLOCK_SIZE 64   // We will use 4 for small examples.
 #define TILE_WIDTH 16
@@ -20,9 +20,9 @@ namespace op
 {
 
 // Compute C = A * B
-__global__ void matrixMultiplyShared(float *A, float *B, float *C,
-                                     int numARows, int numAColumns,
-                                     int numBRows, int numBColumns) 
+__global__ void matrixMultiplyShared(const float * __restrict__ A, const float * __restrict__ B, float * __restrict__ C,
+                                     const int numARows, const int numAColumns,
+                                     const int numBRows, const int numBColumns)
 {
 
   // B += blockIdx.z * numBRows * numBColumns;
@@ -34,28 +34,30 @@ __global__ void matrixMultiplyShared(float *A, float *B, float *C,
   //@@ You have to use shared memory for this MP
   __shared__ float subTileM[TILE_WIDTH][TILE_WIDTH];
   __shared__ float subTileN[TILE_WIDTH][TILE_WIDTH];
-  int bx = blockIdx.x;  
+  int bx = blockIdx.x;
   int by = blockIdx.y;
-  int tx = threadIdx.x; 
+  int tx = threadIdx.x;
   int ty = threadIdx.y;
-  
+
   int Row = by * TILE_WIDTH + ty;
   int Col = bx * TILE_WIDTH + tx;
   float Cvalue = 0;
-  
+
+  #pragma unroll
   for(int m=0; m < ceil(1.0*numAColumns/TILE_WIDTH) ; m++)
   {
     if(Row<numARows && m*TILE_WIDTH+tx<numAColumns)
       subTileM[ty][tx]=A[Row*numAColumns + (m*TILE_WIDTH+tx)];
     else
       subTileM[ty][tx]=0;
-      
-    if(m*TILE_WIDTH+ty<numBRows)  
+
+    if(m*TILE_WIDTH+ty<numBRows)
       subTileN[ty][tx]=B[numBColumns*(m*TILE_WIDTH+ty) + Col];
     else
       subTileN[ty][tx]=0;
-    
+
     __syncthreads();
+    #pragma unroll
     for(int k = 0; k < TILE_WIDTH; k++)
       if (m*TILE_WIDTH+k < numAColumns)
         Cvalue += subTileM[ty][k] * subTileN[k][tx];
@@ -63,7 +65,7 @@ __global__ void matrixMultiplyShared(float *A, float *B, float *C,
   }
   if(Row<numCRows && Col<numCColumns){
     C[Row*numCColumns+Col] = Cvalue;
-  } 
+  }
 }
 
 
@@ -77,12 +79,12 @@ __global__ void matrixMultiplyShared(float *A, float *B, float *C,
     // (void)H_out; // silence declared but never referenced warning. remove this line when you start working
     // (void)W_out; // silence declared but never referenced warning. remove this line when you start working
 
-__global__ void unroll(float* X_out, const float* X, const int M, const int C, const int H, const int W, const int K, const int size){ 
+__global__ void unroll(float * __restrict__ X_out, const float * __restrict__ X, const int M, const int C, const int H, const int W, const int K, const int size){
     // linearized idx across images
     int idx = blockDim.x*blockIdx.x + threadIdx.x;
     if (idx >= size)
         return;
-    
+
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
 
@@ -115,7 +117,7 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
 
     int h = th*TILE_WIDTH + threadIdx.y;
     int w = tw*TILE_WIDTH + threadIdx.x;
-    
+
     #define y4d(i3, i2, i1, i0) y[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
     #define x4d(i3, i2, i1, i0) x[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
     #define k4d(i3, i2, i1, i0) k[(i3) * (C * K * K) + (i2) * (K * K) + (i1) * (K) + i0]
@@ -124,7 +126,7 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
     if (h < H_out && w < W_out) {
         for (int c = 0;  c < C; c++) {    // sum over all input channels
             for (int p = 0; p < K; p++)   // loop over KxK  filter
-                for (int q = 0; q < K; q++)  
+                for (int q = 0; q < K; q++)
                     acc += x4d(blockIdx.z, c, h + p, w + q) * k4d(m, c, p, q);
         }
         y4d(blockIdx.z, m, h, w) = acc;
@@ -135,7 +137,7 @@ __global__ void forward_kernel(float *y, const float *x, const float *k, const i
     #undef x4d
     #undef k4d
 
-/* 
+/*
    This function is called by new-inl.h
    Any code you write should be executed by this function.
    For ECE408, we only expect the float version of the operator to be called, so here we specialize with only floats.
@@ -160,7 +162,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
 
-    
+
 
     // float* x_cpu = (float *) malloc(sizeof(float) * B*C*H*W);
     // cudaMemcpy ( x_cpu, x.dptr_, sizeof(float) * B*C*H*W, cudaMemcpyDeviceToHost );
@@ -168,7 +170,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     float* X_unrolled;
     int size =  C * K * K * H_out * W_out;
     cudaMalloc(&X_unrolled, sizeof(float) * size);
-    
+
     for(int i = 0; i<B; i++) {
 
       // fprintf(fp, "B %d M %d C%d H%d W%d K%d \n", B, M, C, H, W, K);
@@ -204,21 +206,21 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
 
       // Call the matrix multiplication kernel
       dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
-      dim3 dimGrid(ceil((1.0*H_out*W_out)/TILE_WIDTH), ceil((1.0*M)/TILE_WIDTH), 1); 
+      dim3 dimGrid(ceil((1.0*H_out*W_out)/TILE_WIDTH), ceil((1.0*M)/TILE_WIDTH), 1);
       matrixMultiplyShared<<<dimGrid, dimBlock>>>(w.dptr_, X_unrolled, y.dptr_ + i*M*H_out*W_out, M, C*K*K, C*K*K, H_out*W_out);
-        
+
     }
 
     cudaFree(X_unrolled);
 
     // free(X_unrolled_cpu);
     // free(x_cpu);
-    
+
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
 }
 
-/* 
+/*
     This tells mxnet how to do an op when it's not a float.
     This is not used in the ECE408 project
 */
