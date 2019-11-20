@@ -5,8 +5,11 @@
 #include <mxnet/base.h>
 #include <stdio.h> 
 
-#define BLOCK_SIZE 64   // We will use 4 for small examples.
+#define BLOCK_SIZE 64		// We will use 4 for small examples.
 #define TILE_WIDTH 16
+
+#define KERNEL_SIZE 15000
+//This should be less than 65536 bytes (max constant memory) / 4
 
 // An example use of these macros:
 // float a = y4d(0,0,0,0)
@@ -20,7 +23,8 @@ namespace op
 {
 
 // Compute C = A * B
-__global__ void matrixMultiplyShared(float *A, float *B, float *C,
+__constant__ float cached_kernel[KERNEL_SIZE];
+__global__ void matrixMultiplyShared(float *B, float *C,
                                      int numARows, int numAColumns,
                                      int numBRows, int numBColumns) 
 {
@@ -32,7 +36,7 @@ __global__ void matrixMultiplyShared(float *A, float *B, float *C,
   int numCColumns = numBColumns;
   //@@ Insert code to implement matrix multiplication here
   //@@ You have to use shared memory for this MP
-  __shared__ float subTileM[TILE_WIDTH][TILE_WIDTH];
+  // __shared__ float subTileM[TILE_WIDTH][TILE_WIDTH];
   __shared__ float subTileN[TILE_WIDTH][TILE_WIDTH];
   int bx = blockIdx.x;  
   int by = blockIdx.y;
@@ -45,10 +49,10 @@ __global__ void matrixMultiplyShared(float *A, float *B, float *C,
   
   for(int m=0; m < ceil(1.0*numAColumns/TILE_WIDTH) ; m++)
   {
-    if(Row<numARows && m*TILE_WIDTH+tx<numAColumns)
-      subTileM[ty][tx]=A[Row*numAColumns + (m*TILE_WIDTH+tx)];
-    else
-      subTileM[ty][tx]=0;
+    // if(Row<numARows && m*TILE_WIDTH+tx<numAColumns)
+    //   subTileM[ty][tx]=A[Row*numAColumns + (m*TILE_WIDTH+tx)];
+    // else
+    //   subTileM[ty][tx]=0;
       
     if(m*TILE_WIDTH+ty<numBRows)  
       subTileN[ty][tx]=B[numBColumns*(m*TILE_WIDTH+ty) + Col];
@@ -58,7 +62,7 @@ __global__ void matrixMultiplyShared(float *A, float *B, float *C,
     __syncthreads();
     for(int k = 0; k < TILE_WIDTH; k++)
       if (m*TILE_WIDTH+k < numAColumns)
-        Cvalue += subTileM[ty][k] * subTileN[k][tx];
+        Cvalue += cached_kernel[Row*numAColumns + (m*TILE_WIDTH+ k)] * subTileN[k][tx];
     __syncthreads();
   }
   if(Row<numCRows && Col<numCColumns){
@@ -149,7 +153,6 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     // CHECK_EQ(0, 1) << "Remove this line and replace with your implementation";
 
     // Extract the tensor dimensions into B,M,C,H,W,K
-    // ...
     const int B = x.shape_[0];
     const int M = y.shape_[1];
     const int C = x.shape_[1];
@@ -168,6 +171,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     float* X_unrolled;
     int size =  C * K * K * H_out * W_out;
     cudaMalloc(&X_unrolled, sizeof(float) * size);
+    cudaMemcpyToSymbol(cached_kernel, w.dptr_, M*K*K*C*sizeof(float));
     
     for(int i = 0; i<B; i++) {
 
@@ -205,7 +209,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
       // Call the matrix multiplication kernel
       dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
       dim3 dimGrid(ceil((1.0*H_out*W_out)/TILE_WIDTH), ceil((1.0*M)/TILE_WIDTH), 1); 
-      matrixMultiplyShared<<<dimGrid, dimBlock>>>(w.dptr_, X_unrolled, y.dptr_ + i*M*H_out*W_out, M, C*K*K, C*K*K, H_out*W_out);
+      matrixMultiplyShared<<<dimGrid, dimBlock>>>(X_unrolled, y.dptr_ + i*M*H_out*W_out, M, C*K*K, C*K*K, H_out*W_out);
         
     }
 
