@@ -15,12 +15,14 @@ commands:
     - /bin/bash -c "for src in ece408_src/*; do cp -v $src /mxnet/src/operator/custom/.; done" # copy source files to mxnet tree
     - nice -n20 make -C /mxnet # build mxnet
     - pip2 install --user -e /mxnet/python   # install python bindings
-    # - /usr/bin/time python m1.1.py # execute code
+    # - /usr/bin/time python m1.1.py # execute codes
     # - /usr/bin/time python m1.2.py # execute code
     # - time python m1.1.py
     # - time python m1.2.py
     # - time python m2.1.py
-    - nvprof python m4.1.py 
+    - nvprof -o timeline.nvprof python m4.1.py
+    - nvprof --kernels "::unroll:1" --analysis-metrics -o unroll_analysis.nvprof python m4.1.py
+    - nvprof --kernels "::matrixMultiplyShared:1" --analysis-metrics -o matmul_analysis.nvprof python m4.1.py
     # - nvprof python m1.2.py
     # - time python m2.1.py 100 # execute code
     # - time python m2.1.py 1000 # execute code
