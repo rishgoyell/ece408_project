@@ -20,57 +20,41 @@ namespace op
 {
 
 // Compute C = A * B
-__global__ void matrixMultiplyShared(const float * __restrict__ X, const float * __restrict__ Y, float * __restrict__ Z,
-                                     const int B, const int M, const int C, const int H, const int W, const int K)
+__global__ void matrixMultiplyShared(const float * __restrict__ A, const float * __restrict__ B, float * __restrict__ C,
+                                     const int numARows, const int numAColumns,
+                                     const int numBRows, const int numBColumns)
 {
-  const int H_out = H - K + 1;
-  const int W_out = W - K + 1;
 
-  int numAColumns = K * K * C;
-  int numARows = M;
-  int numBRows = numAColumns;
-  int numBColumns = H_out * W_out * B;
+  // B += blockIdx.z * numBRows * numBColumns;
+  // C += blockIdx.z * numARows * numBColumns;
 
   int numCRows = numARows;
   int numCColumns = numBColumns;
-
+  //@@ Insert code to implement matrix multiplication here
+  //@@ You have to use shared memory for this MP
   __shared__ float subTileM[TILE_WIDTH][TILE_WIDTH];
   __shared__ float subTileN[TILE_WIDTH][TILE_WIDTH];
-
-
+  int bx = blockIdx.x;
+  int by = blockIdx.y;
   int tx = threadIdx.x;
   int ty = threadIdx.y;
 
-  int Row = blockIdx.y * TILE_WIDTH + ty;
-  int Col = blockIdx.x * TILE_WIDTH + tx;
+  int Row = by * TILE_WIDTH + ty;
+  int Col = bx * TILE_WIDTH + tx;
   float Cvalue = 0;
-
-  int cs = W_out * H_out;
-  int ks = K * K;
-  int srow = (Col % (cs)) / W_out;
-  int scol = (Col % (cs)) % W_out;
-  int batch = Col / cs;
-
-  #define Y4d(i3, i2, i1, i0) Y[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-  #define Z4d(i3, i2, i1, i0) Z[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 
   #pragma unroll
   for(int m=0; m < ceil(1.0*numAColumns/TILE_WIDTH) ; m++)
   {
     if(Row<numARows && m*TILE_WIDTH+tx<numAColumns)
-      subTileM[ty][tx]=X[Row*numAColumns + (m*TILE_WIDTH+tx)];
+      subTileM[ty][tx]=A[Row*numAColumns + (m*TILE_WIDTH+tx)];
     else
       subTileM[ty][tx]=0;
 
-    if(m*TILE_WIDTH+ty<numBRows){
-      int tempRow = m*TILE_WIDTH+ty;
-      int channel = tempRow / ks;
-      int nrow = srow + (tempRow%ks)/K;
-      int ncol = scol + (tempRow%ks)%K;
-      subTileN[ty][tx] = Y4d(batch, channel, nrow, ncol);
-    }
+    if(m*TILE_WIDTH+ty<numBRows)
+      subTileN[ty][tx]=B[numBColumns*(m*TILE_WIDTH+ty) + Col];
     else
-      subTileN[ty][tx] = 0;
+      subTileN[ty][tx]=0;
 
     __syncthreads();
     #pragma unroll
@@ -79,12 +63,9 @@ __global__ void matrixMultiplyShared(const float * __restrict__ X, const float *
         Cvalue += subTileM[ty][k] * subTileN[k][tx];
     __syncthreads();
   }
-
-  if(Row<numCRows && Col<numCColumns)
-    Z4d(batch, Row, srow, scol) = Cvalue;
-
-  #undef Y4d
-  #undef Z4d
+  if(Row<numCRows && Col<numCColumns){
+    C[Row*numCColumns+Col] = Cvalue;
+  }
 }
 
 
@@ -186,9 +167,51 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     // float* x_cpu = (float *) malloc(sizeof(float) * B*C*H*W);
     // cudaMemcpy ( x_cpu, x.dptr_, sizeof(float) * B*C*H*W, cudaMemcpyDeviceToHost );
 
-    dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
-    dim3 dimGrid(ceil((1.0 * B * H_out*W_out)/TILE_WIDTH), ceil((1.0*M)/TILE_WIDTH), 1);
-    matrixMultiplyShared<<<dimGrid, dimBlock>>>(w.dptr_, x.dptr_, y.dptr_ , B, M, C, H, W, K);
+    float* X_unrolled;
+    int size =  C * K * K * H_out * W_out;
+    cudaMalloc(&X_unrolled, sizeof(float) * size);
+
+    for(int i = 0; i<B; i++) {
+
+      // fprintf(fp, "B %d M %d C%d H%d W%d K%d \n", B, M, C, H, W, K);
+
+      // #define x4d(i3, i2, i1, i0) x_cpu[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
+
+
+      // fprintf(fp, "Printing the first input image\n");
+      // for(int i = 0; i < B; i++) {
+      //   for(int j = 0; j < C; j++) {
+      //     for(int k = 0; k < H; k++){
+      //       for(int l = 0; l < W; l++)
+      //         fprintf(fp, "%f ", x4d(i, j, k, l));
+      //       fprintf(fp, "\n");
+      //     }
+      //     fprintf(fp, "\n");
+      //   }
+      //   fprintf(fp, "\n\n\n");
+      // }
+
+      // #undef x4d
+      // Call the unroll kernel
+      dim3 blockDim(BLOCK_SIZE, 1, 1);
+      dim3 gridDim(ceil(1.0*size/BLOCK_SIZE), 1, 1);
+      unroll<<<gridDim, blockDim>>>(X_unrolled, x.dptr_ + i*C*H*W, M, C, H, W, K, size);
+
+      // fprintf(fp, "Printing first unroll\n");
+      // float* X_unrolled_cpu = (float *) malloc(sizeof(float) * size);
+      // cudaMemcpy ( X_unrolled_cpu, X_unrolled, size* sizeof(float), cudaMemcpyDeviceToHost );
+      // for(int i =0; i <  size; i++){
+      //   fprintf(fp, "%f ", X_unrolled_cpu[i]);
+      // }
+
+      // Call the matrix multiplication kernel
+      dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
+      dim3 dimGrid(ceil((1.0*H_out*W_out)/TILE_WIDTH), ceil((1.0*M)/TILE_WIDTH), 1);
+      matrixMultiplyShared<<<dimGrid, dimBlock>>>(w.dptr_, X_unrolled, y.dptr_ + i*M*H_out*W_out, M, C*K*K, C*K*K, H_out*W_out);
+
+    }
+
+    cudaFree(X_unrolled);
 
     // free(X_unrolled_cpu);
     // free(x_cpu);
