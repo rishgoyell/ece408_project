@@ -16,6 +16,11 @@
 #define TILE_WIDTH 24
 #define K 5
 #define ks 25
+#define HOUT1 66
+#define HOUT2 29
+#define WOUT1 66
+#define WOUT2 29
+
 __constant__ float w_con_dptr[10000];
 namespace mxnet
 {
@@ -26,12 +31,10 @@ namespace op
 __global__ void matrixMultiplyShared1(const float * __restrict__ Y, float * __restrict__ Z,
                                      const int B, const int M, const int C, const int H, const int W)
 {
-  const int H_out = H - K + 1;
-  const int W_out = W - K + 1;
   const int numAColumns = ks * C;
   const int numARows = M;
   const int numBRows = numAColumns;
-  const int numBColumns = H_out * W_out * B;
+  const int numBColumns = HOUT1 * WOUT1 * B;
 
 
   __shared__ float subTileN[Y_1][X_1];
@@ -44,14 +47,14 @@ __global__ void matrixMultiplyShared1(const float * __restrict__ Y, float * __re
   int Col = blockIdx.x * X_1 + tx;
   float Cvalue = 0;
 
-  int cs = W_out * H_out;
+  int cs = WOUT1 * HOUT1;
   //int ks = K * K;
-  int srow = (Col % (cs)) / W_out;
-  int scol = (Col) % W_out; //(Col % (cs)) % W_out;
+  int srow = (Col % (cs)) / WOUT1;
+  int scol = (Col) % WOUT1; //(Col % (cs)) % W_out;
   int batch = blockIdx.z;
 
   #define Y4d(i3, i2, i1, i0) Y[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-  #define Z4d(i3, i2, i1, i0) Z[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
+  #define Z4d(i3, i2, i1, i0) Z[(i3) * (M * HOUT1 * WOUT1) + (i2) * (HOUT1 * WOUT1) + (i1) * (WOUT1) + i0]
 
   #pragma unroll
   for(int m=0; m < my_ceil(numAColumns,Y_1) ; m++)
@@ -66,7 +69,7 @@ __global__ void matrixMultiplyShared1(const float * __restrict__ Y, float * __re
     else
       subTileN[ty][tx] = 0.0f;
     __syncthreads();
-	
+
 	#pragma unroll
     for(int k = 0; k < Y_1; k++)
       if (m*Y_1+k < numAColumns  && Row<numARows)
@@ -85,12 +88,9 @@ __global__ void matrixMultiplyShared2(const float * __restrict__ X,const float *
                                      const int B, const int M, const int C, const int H, const int W)
 
 {
-
-  const int H_out = H - K + 1;
-  const int W_out = W - K + 1;
   const int numAColumns = ks * C;
   const int numARows = M;
-  const int numBColumns = H_out * W_out * B;
+  const int numBColumns = HOUT2 * WOUT2 * B;
 
   __shared__ float subTileN[RATIO][TILE_WIDTH_N];
   float registers[TILE_WIDTH_N];
@@ -98,12 +98,12 @@ __global__ void matrixMultiplyShared2(const float * __restrict__ X,const float *
   int Row = threadIdx.y + blockDim.y * blockIdx.y;
 
   int Col = blockIdx.x*TILE_WIDTH_N;
-  int N_col_to_load = Col + threadIdx.y%TILE_WIDTH_N; 
+  int N_col_to_load = Col + threadIdx.y%TILE_WIDTH_N;
 
-  int cs = W_out * H_out;
+  int cs = WOUT2 * HOUT2;
   //int ks = K * K;
-  int srow = (N_col_to_load % (cs)) / W_out;
-  int scol = (N_col_to_load % (cs)) % W_out;
+  int srow = (N_col_to_load % (cs)) / WOUT2;
+  int scol = (N_col_to_load % (cs)) % WOUT2;
   int batch = blockIdx.z;
 
   // calculate index of subTileN that thread will load
@@ -115,7 +115,7 @@ __global__ void matrixMultiplyShared2(const float * __restrict__ X,const float *
     registers[reg] = 0.0f;
 
   #define Y4d(i3, i2, i1, i0) Y[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-  #define Z4d(i3, i2, i1, i0) Z[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
+  #define Z4d(i3, i2, i1, i0) Z[(i3) * (M * HOUT2 * WOUT2) + (i2) * (HOUT2 * WOUT2) + (i1) * (WOUT2) + i0]
 
   //start iteration loop
   #pragma unroll
@@ -154,9 +154,9 @@ __global__ void matrixMultiplyShared2(const float * __restrict__ X,const float *
   {
     if(Row < numARows && Col + reg < numBColumns)
     {
-      int temp_col = Col + reg; 
-      int srow = (temp_col % (cs)) / W_out;
-      int scol = (temp_col % (cs)) % W_out;
+      int temp_col = Col + reg;
+      int srow = (temp_col % (cs)) / WOUT2;
+      int scol = (temp_col % (cs)) % WOUT2;
       int batch = blockIdx.z;//temp_col/ cs;
       Z4d(batch, Row, srow, scol) = registers[reg];
     }
@@ -172,7 +172,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
 
 
     // Extract the tensor dimensions into B,M,C,H,W,K
-    
+
 	const int B = x.shape_[0];
     const int M = y.shape_[1];
     const int C = x.shape_[1];
@@ -182,23 +182,23 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
-	
+
     //first layer has 12 output channels and one input channel
-   
-	//cudaMemcpyToSymbol(w_con_dptr, w.dptr_, M*C*K*K*sizeof(float));//,cudaMemcpyDeviceToDevice); 
-	
+
+	//cudaMemcpyToSymbol(w_con_dptr, w.dptr_, M*C*K*K*sizeof(float));//,cudaMemcpyDeviceToDevice);
+
 	if(M==24) {
 		dim3 dimBlock(1, TILE_WIDTH_M, 1);
     	dim3 dimGrid(my_ceil(H_out*W_out,TILE_WIDTH_N), my_ceil(M,TILE_WIDTH_M), B);
     	matrixMultiplyShared2<<<dimGrid, dimBlock>>>(w.dptr_, x.dptr_, y.dptr_ , B, M, C, H, W);
 	}
-	
+
 	else {
-		cudaMemcpyToSymbol(w_con_dptr, w.dptr_, M*C*ks*sizeof(float));//,cudaMemcpyDeviceToDevice); 
+		cudaMemcpyToSymbol(w_con_dptr, w.dptr_, M*C*ks*sizeof(float));//,cudaMemcpyDeviceToDevice);
 		dim3 dimBlock(X_1, Y_1, 1);
     	dim3 dimGrid(my_ceil(H_out*W_out,X_1), my_ceil(M,Y_1), B);
     	matrixMultiplyShared1<<<dimGrid, dimBlock>>>(x.dptr_, y.dptr_ , B, M, C, H, W);
-	}		
+	}
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
     //MSHADOW_CUDA_CALL(cudaDeviceSynchronize());
