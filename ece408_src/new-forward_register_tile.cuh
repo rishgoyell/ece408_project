@@ -5,7 +5,7 @@
 #include <mxnet/base.h>
 #include <stdio.h>
 
-#define BLOCK_SIZE 64   // We will use 4 for small examples.
+// #define BLOCK_SIZE 64   // We will use 4 for small examples.
 #define TILE_WIDTH 16
 
 // An example use of these macros:
@@ -13,124 +13,91 @@
 // y4d(0,0,0,0) = a
 
 
-#define TILE_WIDTH_M
-#define TILE_WIDTH_N
-#define RATIO TILE_WIDTH_M/TILE_WIDTH_N
+#define TILE_WIDTH_N 16
+#define TILE_WIDTH_M 64
+#define RATIO 4
 namespace mxnet
 {
 namespace op
 {
 
-
-__global__ void matrixMultiplyShared(float *M, float *N, float *P, int numARows, int numAColumns, int numBRows, int numBColumns, int numCRows, int numCColumns) {
-	//allocate space for registers per thread and shared memory per block
-	__shared__ float subTileN[RATIO][TILE_WIDTH_N];
-	float registers[TILE_WIDTH_N];
-	float rowM[RATIO];
-	int Row = threadIdx.x + blockDim.x * blockIdx.x;
-
-	int Col = blockIdx.y*TILE_WIDTH_N;
-	int N_col_to_load = Col + threadIdx.x%TILE_WIDTH_N;
-
-	// calculate index of subTileN that thread will load
-	int n_row = threadIdx.x/TILE_WIDTH_N;
-	int n_col = threadIdx.x%TILE_WIDTH_N;
-
-	//initialize registers to 0
-	for(int reg = 0; reg < TILE_WIDTH_N; reg++)
-		registers[reg] = 0.0;
-
-	//start iteration loop
-	for(int it = 0; it < ceil(numAColumns*1.0/RATIO); it++) {
-		//load the values required for the iteration
-		for(int step = 0; step < RATIO; step++) {
-			if (Row<numARows && it*RATIO + step < numAColumns)
-				rowM[step] = M[Row*numAColumns + it*RATIO + step];
-			else
-				rowM[step] = 0.0;
-		}
-
-		if(it*RATIO + n_row < numAColumns && N_col_to_load < numBColumns)
-			subTileN[n_row][n_col] = N[(it*RATIO + n_row)*numBColumns + N_col_to_load];
-		else
-			subTileN[n_row][n_col] = 0.0;
-		__syncthreads();
-
-		//now we can begin compute
-		for(int step = 0; step < RATIO; step++)
-			for(int reg = 0; reg < TILE_WIDTH_N; reg++)
-				registers[reg] += rowM[step] * subTileN[step][reg];
-		__syncthreads();
-	}
-
-	for(int reg = 0; reg < TILE_WIDTH_N; reg++)
-		if(Row < numARows && Col + reg < numBColumns)
-			P[Row*numCColumns + (Col + reg)] = registers[reg];
-}
-
 // Compute C = A * B
 __global__ void matrixMultiplyShared(const float * __restrict__ X, const float * __restrict__ Y, float * __restrict__ Z,
-                                     const int B, const int M, const int C, const int H, const int W, const int K)
+                                     const int B, const int M, const int C, const int H, const int W, const int K, const int numARows, const int numAColumns, const int numBColumns)
 {
   const int H_out = H - K + 1;
   const int W_out = W - K + 1;
 
-  int numAColumns = K * K * C;
-  int numARows = M;
-  int numBRows = numAColumns;
-  int numBColumns = H_out * W_out * B;
 
-  int numCRows = numARows;
-  int numCColumns = numBColumns;
+  __shared__ float subTileN[RATIO][TILE_WIDTH_N];
+  float registers[TILE_WIDTH_N];
+  float rowM[RATIO];
+  int Row = threadIdx.y + blockDim.y * blockIdx.y;
 
-  __shared__ float subTileM[TILE_WIDTH][TILE_WIDTH];
-  __shared__ float subTileN[TILE_WIDTH][TILE_WIDTH];
-
-
-  int tx = threadIdx.x;
-  int ty = threadIdx.y;
-
-  int Row = blockIdx.y * TILE_WIDTH + ty;
-  int Col = blockIdx.x * TILE_WIDTH + tx;
-  float Cvalue = 0;
+  int Col = blockIdx.x*TILE_WIDTH_N;
+  int N_col_to_load = Col + threadIdx.y%TILE_WIDTH_N; 
 
   int cs = W_out * H_out;
   int ks = K * K;
-  int srow = (Col % (cs)) / W_out;
-  int scol = (Col % (cs)) % W_out;
-  int batch = Col / cs;
+  int srow = (N_col_to_load % (cs)) / W_out;
+  int scol = (N_col_to_load % (cs)) % W_out;
+  int batch = N_col_to_load / cs;
+
+  // calculate index of subTileN that thread will load
+  int n_row = threadIdx.y/TILE_WIDTH_N;
+  int n_col = threadIdx.y%TILE_WIDTH_N;
+
+  //initialize registers to 0
+  for(int reg = 0; reg < TILE_WIDTH_N; reg++)
+    registers[reg] = 0.0;
 
   #define Y4d(i3, i2, i1, i0) Y[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
   #define Z4d(i3, i2, i1, i0) Z[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
 
+  //start iteration loop
   #pragma unroll
-  for(int m=0; m < ceil(1.0*numAColumns/TILE_WIDTH) ; m++)
+  for(int it = 0; it < ceil(numAColumns*1.0/RATIO); it++)
   {
-    if(Row<numARows && m*TILE_WIDTH+tx<numAColumns)
-      subTileM[ty][tx]=X[Row*numAColumns + (m*TILE_WIDTH+tx)];
-    else
-      subTileM[ty][tx]=0;
+    //load M
+    for(int step = 0; step < RATIO; step++) {
+      if (Row<numARows && it*RATIO + step < numAColumns)
+        rowM[step] = X[Row*numAColumns + it*RATIO + step];
+      else
+        rowM[step] = 0.0;
+    }
 
-    if(m*TILE_WIDTH+ty<numBRows){
-      int tempRow = m*TILE_WIDTH+ty;
+    //load N
+    if(it*RATIO + n_row < numAColumns && N_col_to_load < numBColumns)
+    {
+      int tempRow = it*RATIO + n_row;
       int channel = tempRow / ks;
       int nrow = srow + (tempRow%ks)/K;
       int ncol = scol + (tempRow%ks)%K;
-      subTileN[ty][tx] = Y4d(batch, channel, nrow, ncol);
+      subTileN[n_row][n_col] = Y4d(batch, channel, nrow, ncol); // N[(it*RATIO + n_row)*numBColumns + N_col_to_load];
     }
     else
-      subTileN[ty][tx] = 0;
-
+      subTileN[n_row][n_col] = 0.0;
     __syncthreads();
+
     #pragma unroll
-    for(int k = 0; k < TILE_WIDTH; k++)
-      if (m*TILE_WIDTH+k < numAColumns)
-        Cvalue += subTileM[ty][k] * subTileN[k][tx];
+    for(int step = 0; step < RATIO; step++)
+      for(int reg = 0; reg < TILE_WIDTH_N; reg++)
+        registers[reg] += rowM[step] * subTileN[step][reg];
     __syncthreads();
   }
 
-  if(Row<numCRows && Col<numCColumns)
-    Z4d(batch, Row, srow, scol) = Cvalue;
+  #pragma unroll
+  for(int reg = 0; reg < TILE_WIDTH_N; reg++)
+  {
+    if(Row < numARows && Col + reg < numBColumns)
+    {
+      int temp_col = Col + reg; 
+      int srow = (temp_col % (cs)) / W_out;
+      int scol = (temp_col % (cs)) % W_out;
+      int batch = temp_col / cs;
+      Z4d(batch, Row, srow, scol) = registers[reg];
+    }
+  }
 
   #undef Y4d
   #undef Z4d
@@ -235,9 +202,12 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     // float* x_cpu = (float *) malloc(sizeof(float) * B*C*H*W);
     // cudaMemcpy ( x_cpu, x.dptr_, sizeof(float) * B*C*H*W, cudaMemcpyDeviceToHost );
 
-    dim3 dimBlock(TILE_WIDTH, TILE_WIDTH, 1);
-    dim3 dimGrid(ceil((1.0 * B * H_out*W_out)/TILE_WIDTH), ceil((1.0*M)/TILE_WIDTH), 1);
-    matrixMultiplyShared<<<dimGrid, dimBlock>>>(w.dptr_, x.dptr_, y.dptr_ , B, M, C, H, W, K);
+    dim3 dimBlock(1, TILE_WIDTH_M, 1);
+    dim3 dimGrid( ceil((1.0 * B * H_out*W_out)/TILE_WIDTH_N), ceil((1.0*M)/TILE_WIDTH_M), 1);
+    int numAColumns = K * K * C;
+    int numARows = M;
+    int numBColumns = H_out * W_out * B;
+    matrixMultiplyShared<<<dimGrid, dimBlock>>>(w.dptr_, x.dptr_, y.dptr_ , B, M, C, H, W, K, numARows, numAColumns, numBColumns);
 
     // free(X_unrolled_cpu);
     // free(x_cpu);
