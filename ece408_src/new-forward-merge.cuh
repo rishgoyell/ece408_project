@@ -9,12 +9,13 @@
 #define X_1 32
 #define Y_1 13
 
-#define TILE_WIDTH_N 16
-#define LOG2_TILE_WIDTH_N 4 //Change % operation if not power of 2!!!
-#define TILE_WIDTH_M 64
-#define RATIO 4
+#define TILE_WIDTH_N 32
+#define LOG2_TILE_WIDTH_N 5 //Change % operation if not power of 2!!!
+#define TILE_WIDTH_M 32
+#define RATIO 1
 #define TILE_WIDTH 24
-
+#define K 5
+#define ks 25
 __constant__ float w_con_dptr[10000];
 namespace mxnet
 {
@@ -23,11 +24,11 @@ namespace op
 
 // Compute C = A * B
 __global__ void matrixMultiplyShared1(const float * __restrict__ Y, float * __restrict__ Z,
-                                     const int B, const int M, const int C, const int H, const int W, const int K)
+                                     const int B, const int M, const int C, const int H, const int W)
 {
   const int H_out = H - K + 1;
   const int W_out = W - K + 1;
-  const int numAColumns = K * K * C;
+  const int numAColumns = ks * C;
   const int numARows = M;
   const int numBRows = numAColumns;
   const int numBColumns = H_out * W_out * B;
@@ -44,7 +45,7 @@ __global__ void matrixMultiplyShared1(const float * __restrict__ Y, float * __re
   float Cvalue = 0;
 
   int cs = W_out * H_out;
-  int ks = K * K;
+  //int ks = K * K;
   int srow = (Col % (cs)) / W_out;
   int scol = (Col) % W_out; //(Col % (cs)) % W_out;
   int batch = blockIdx.z;
@@ -81,13 +82,13 @@ __global__ void matrixMultiplyShared1(const float * __restrict__ Y, float * __re
 }
 
 __global__ void matrixMultiplyShared2(const float * __restrict__ X,const float * __restrict__ Y, float * __restrict__ Z,
-                                     const int B, const int M, const int C, const int H, const int W, const int K)
+                                     const int B, const int M, const int C, const int H, const int W)
 
 {
 
   const int H_out = H - K + 1;
   const int W_out = W - K + 1;
-  const int numAColumns = K * K * C;
+  const int numAColumns = ks * C;
   const int numARows = M;
   const int numBColumns = H_out * W_out * B;
 
@@ -100,7 +101,7 @@ __global__ void matrixMultiplyShared2(const float * __restrict__ X,const float *
   int N_col_to_load = Col + threadIdx.y%TILE_WIDTH_N; 
 
   int cs = W_out * H_out;
-  int ks = K * K;
+  //int ks = K * K;
   int srow = (N_col_to_load % (cs)) / W_out;
   int scol = (N_col_to_load % (cs)) % W_out;
   int batch = blockIdx.z;
@@ -165,81 +166,6 @@ __global__ void matrixMultiplyShared2(const float * __restrict__ X,const float *
   #undef Z4d
 }
 
-__global__ void matrixMultiplyShared(const float * __restrict__ X,const float * __restrict__ Y, float * __restrict__ Z,
-                                     const int B, const int M, const int C, const int H, const int W, const int K)
-{
-
-  const int H_out = H - K + 1;
-  const int W_out = W - K + 1;
-
-  int numAColumns = K * K * C;
-  int numARows = M;
-  int numBRows = numAColumns;
-  int numBColumns = H_out * W_out * B;
-
-  int numCRows = numARows;
-  int numCColumns = numBColumns;
-
-  __shared__ float subTileM[TILE_WIDTH][TILE_WIDTH];
-  __shared__ float subTileN[TILE_WIDTH][TILE_WIDTH];
-
-
-  int tx = threadIdx.x;
-  int ty = threadIdx.y;
-
-  int Row = blockIdx.y * TILE_WIDTH + ty;
-  int Col = blockIdx.x * TILE_WIDTH + tx;
-  float Cvalue = 0;
-
-  int cs = W_out * H_out;
-  int ks = K * K;
-  int srow = (Col % (cs)) / W_out;
-  int scol = (Col % (cs)) % W_out;
-  int batch = Col / cs;
-
-  #define Y4d(i3, i2, i1, i0) Y[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
-  #define Z4d(i3, i2, i1, i0) Z[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
-
-  #pragma unroll
-  for(int m=0; m < (numAColumns+TILE_WIDTH-1)/TILE_WIDTH ; m++)
-  {
-    
-	if(Row<numARows && m*TILE_WIDTH+tx<numAColumns)
-      subTileM[ty][tx]=X[Row*numAColumns + (m*TILE_WIDTH+tx)];
-    else
-      subTileM[ty][tx]=0;
-    
-	if(m*TILE_WIDTH+ty<numBRows){
-      int tempRow = m*TILE_WIDTH+ty;
-      int channel = tempRow / ks;
-      int nrow = srow + (tempRow%ks)/K;
-      int ncol = scol + (tempRow%ks)%K;
-      subTileN[ty][tx] = Y4d(batch, channel, nrow, ncol);
-    }
-    else
-      subTileN[ty][tx] = 0;
-
-    __syncthreads();
-    #pragma unroll
-    for(int k = 0; k < TILE_WIDTH; k++)
-      if (m*TILE_WIDTH+k < numAColumns && Row<numARows)
-        Cvalue += subTileM[ty][k] * subTileN[k][tx];
-    __syncthreads();
-  }
-
-  if(Row<numCRows && Col<numCColumns)
-    Z4d(batch, Row, srow, scol) = Cvalue;
-
-  #undef Y4d
-  #undef Z4d
-}
-
-/*
-   This function is called by new-inl.h
-   Any code you write should be executed by this function.
-   For ECE408, we only expect the float version of the operator to be called, so here we specialize with only floats.
-*/
-
 template <>
 void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tensor<gpu, 4, float> &x, const mshadow::Tensor<gpu, 4, float> &w)
 {
@@ -252,7 +178,7 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
     const int C = x.shape_[1];
     const int H = x.shape_[2];
     const int W = x.shape_[3];
-    const int K = w.shape_[3];
+  //  const int K = w.shape_[3];
 
     const int H_out = H - K + 1;
     const int W_out = W - K + 1;
@@ -264,14 +190,14 @@ void forward<gpu, float>(mshadow::Tensor<gpu, 4, float> &y, const mshadow::Tenso
 	if(M==24) {
 		dim3 dimBlock(1, TILE_WIDTH_M, 1);
     	dim3 dimGrid(my_ceil(H_out*W_out,TILE_WIDTH_N), my_ceil(M,TILE_WIDTH_M), B);
-    	matrixMultiplyShared2<<<dimGrid, dimBlock>>>(w.dptr_, x.dptr_, y.dptr_ , B, M, C, H, W, K);
+    	matrixMultiplyShared2<<<dimGrid, dimBlock>>>(w.dptr_, x.dptr_, y.dptr_ , B, M, C, H, W);
 	}
 	
 	else {
-		cudaMemcpyToSymbol(w_con_dptr, w.dptr_, M*C*K*K*sizeof(float));//,cudaMemcpyDeviceToDevice); 
+		cudaMemcpyToSymbol(w_con_dptr, w.dptr_, M*C*ks*sizeof(float));//,cudaMemcpyDeviceToDevice); 
 		dim3 dimBlock(X_1, Y_1, 1);
     	dim3 dimGrid(my_ceil(H_out*W_out,X_1), my_ceil(M,Y_1), B);
-    	matrixMultiplyShared1<<<dimGrid, dimBlock>>>(x.dptr_, y.dptr_ , B, M, C, H, W, K);
+    	matrixMultiplyShared1<<<dimGrid, dimBlock>>>(x.dptr_, y.dptr_ , B, M, C, H, W);
 	}		
 
     // Use MSHADOW_CUDA_CALL to check for CUDA runtime errors.
