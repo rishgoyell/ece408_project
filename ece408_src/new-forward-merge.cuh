@@ -10,6 +10,7 @@
 #define Y_1 13
 
 #define TILE_WIDTH_N 16
+#define LOG2_TILE_WIDTH_N 4 //Change % operation if not power of 2!!!
 #define TILE_WIDTH_M 64
 #define RATIO 4
 #define TILE_WIDTH 24
@@ -45,7 +46,7 @@ __global__ void matrixMultiplyShared1(const float * __restrict__ Y, float * __re
   int cs = W_out * H_out;
   int ks = K * K;
   int srow = (Col % (cs)) / W_out;
-  int scol = (Col % (cs)) % W_out;
+  int scol = (Col) % W_out; //(Col % (cs)) % W_out;
   int batch = blockIdx.z;
 
   #define Y4d(i3, i2, i1, i0) Y[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
@@ -58,14 +59,14 @@ __global__ void matrixMultiplyShared1(const float * __restrict__ Y, float * __re
       int tempRow = m*Y_1+ty;
       int channel = tempRow / ks;
       int nrow = srow + (tempRow%ks)/K;
-      int ncol = scol + (tempRow%ks)%K;
+      int ncol = scol + (tempRow%K); //(tempRow%ks)%K;
       subTileN[ty][tx] = Y4d(batch, channel, nrow, ncol);
     }
     else
-      subTileN[ty][tx] = 0;
-
+      subTileN[ty][tx] = 0.0f;
     __syncthreads();
-    #pragma unroll
+	
+	#pragma unroll
     for(int k = 0; k < Y_1; k++)
       if (m*Y_1+k < numAColumns  && Row<numARows)
         Cvalue += w_con_dptr[Row*numAColumns + (m*Y_1+k)] * subTileN[k][tx];
@@ -105,12 +106,12 @@ __global__ void matrixMultiplyShared2(const float * __restrict__ X,const float *
   int batch = blockIdx.z;
 
   // calculate index of subTileN that thread will load
-  int n_row = threadIdx.y/TILE_WIDTH_N;
-  int n_col = threadIdx.y%TILE_WIDTH_N;
+  int n_row = threadIdx.y>>LOG2_TILE_WIDTH_N; //threadIdx.y/TILE_WIDTH_N;
+  int n_col = threadIdx.y & (TILE_WIDTH_N-1); //threadIdx.y%TILE_WIDTH_N;
 
   //initialize registers to 0
   for(int reg = 0; reg < TILE_WIDTH_N; reg++)
-    registers[reg] = 0.0;
+    registers[reg] = 0.0f;
 
   #define Y4d(i3, i2, i1, i0) Y[(i3) * (C * H * W) + (i2) * (H * W) + (i1) * (W) + i0]
   #define Z4d(i3, i2, i1, i0) Z[(i3) * (M * H_out * W_out) + (i2) * (H_out * W_out) + (i1) * (W_out) + i0]
@@ -124,7 +125,7 @@ __global__ void matrixMultiplyShared2(const float * __restrict__ X,const float *
       if (Row<numARows && it*RATIO + step < numAColumns)
         rowM[step] = X[Row*numAColumns + it*RATIO + step];
       else
-        rowM[step] = 0.0;
+        rowM[step] = 0.0f;
     }
 
     //load N
@@ -137,7 +138,7 @@ __global__ void matrixMultiplyShared2(const float * __restrict__ X,const float *
       subTileN[n_row][n_col] = Y4d(batch, channel, nrow, ncol); // N[(it*RATIO + n_row)*numBColumns + N_col_to_load];
     }
     else
-      subTileN[n_row][n_col] = 0.0;
+      subTileN[n_row][n_col] = 0.0f;
     __syncthreads();
 
     #pragma unroll
