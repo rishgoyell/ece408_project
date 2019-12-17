@@ -16,8 +16,8 @@
 #define TILE_WIDTH 24
 #define K 5
 #define ks 25
-#define OUTDIM1 (H-K+1)
-#define OUTDIM2 (H-K+1)
+#define OUTDIM1 66
+#define OUTDIM2 29
 
 __constant__ float w_con_dptr[10000];
 namespace mxnet
